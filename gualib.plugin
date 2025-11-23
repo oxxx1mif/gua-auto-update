@@ -38,7 +38,7 @@ __name__ = "GuALib"
 __description__ = "**Library for GuA** | Based on QuantaHut"
 __icon__ = "GuAIcons/1"
 __id__ = "gualib"
-__version__ = "1.0.1"
+__version__ = "1.0.0"
 __author__ = "@oxxximif | oxxx1Storm"
 __min_version__ = "12.1.1"
 __priority__ = 1
@@ -569,7 +569,7 @@ class QuantaHut(BasePlugin):
                 branch_index = self.get_setting("update_branch", 0)
                 branch = "main" if branch_index == 0 else "Beta"
                 
-                version_url = f""
+                version_url = f"https://raw.githubusercontent.com/oxxx1mif/gua-auto-update/refs/heads/main/gua_changelog.json"
                 quantahut_log(f"Fetching from {branch} branch: {version_url}")
                 
                 with urllib.request.urlopen(version_url, timeout=10) as response:
@@ -585,7 +585,7 @@ class QuantaHut(BasePlugin):
                     sticker_circle = version_data.get("sticker_circle", False)
                     sticker_size = version_data.get("sticker_size", 160)
                     
-                    self.download_url = f""
+                    self.download_url = f"https://raw.githubusercontent.com/oxxx1mif/gua-auto-update/refs/heads/main/gualib.plugin"
                     
                     quantahut_log(f"Latest version: {self.latest_version}")
                     quantahut_log(f"Current version: {__version__}")
@@ -640,7 +640,7 @@ class QuantaHut(BasePlugin):
         
         try:
             showupdatebottomsheet(
-                title=f"QuantaHut Update: v{self.latest_version}",
+                title=f"gualib update: v{self.latest_version}",
                 subtitle=f"Current version: {__version__}",
                 description=self.changelog,
                 sticker_pack=sticker_pack,
@@ -656,8 +656,8 @@ class QuantaHut(BasePlugin):
             quantahut_log(f"Error showing QuantaHut update sheet: {e}")
     
     def _download_and_install_update(self):
-        quantahut_log("Starting QuantaHut update download...")
-        BulletinHelper.show_info("Downloading QuantaHut update...")
+        quantahut_log("Starting gualib update download...")
+        BulletinHelper.show_info("Downloading gualib update...")
         
         def download_thread():
             try:
@@ -677,7 +677,7 @@ class QuantaHut(BasePlugin):
                 files_dir = app_context.getFilesDir()
                 plugins_dir = os.path.join(str(files_dir), "plugins")
                 
-                plugin_file = os.path.join(plugins_dir, "quantahut.py")
+                plugin_file = os.path.join(plugins_dir, "GuALib.py")
                 
                 quantahut_log(f"Installing to: {plugin_file}")
                 
@@ -686,13 +686,13 @@ class QuantaHut(BasePlugin):
                 
                 quantahut_log("QuantaHut updated successfully!")
                 
-                success_msg = f"QuantaHut updated to v{self.latest_version}! Restart required."
+                success_msg = f"gualib updated to v{self.latest_version}! Restart required."
                 run_on_ui_thread(lambda: BulletinHelper.show_success(success_msg))
                 
                 run_on_ui_thread(self._show_restart_prompt)
                 
             except Exception as e:
-                error_msg = f"QuantaHut update failed: {str(e)}"
+                error_msg = f"gualib update failed: {str(e)}"
                 quantahut_log(f"Error downloading update: {e}")
                 run_on_ui_thread(lambda msg=error_msg: BulletinHelper.show_error(msg))
         
@@ -703,7 +703,7 @@ class QuantaHut(BasePlugin):
     def _show_restart_prompt(self):
         try:
             show_restart_bulletin(
-                message=get_text("restart_to_apply_quantahut_update", "Restart app to apply QuantaHut update"),
+                message="Restart app to apply gualib update",
                 button_text=get_text("restart", "Restart")
             )
         except Exception as e:
