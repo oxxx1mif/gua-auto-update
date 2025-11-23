@@ -1,0 +1,13 @@
+{
+  "version": "1.0.1",
+  "release_date": "2025-11-23",
+  "changelog_text": "**What's New in v1.4.7:**\n\n**Added:**\n• Loading dialogue when plugins are importing\n• New long click menu for filter pills with 2 new items: Delete plugins, Export plugins\n• New \"Update Localization\" & \"Check for Plugin Update\" button in plugin settings\n\n**Fixed:**\n• Tried to fix x button position changing when enabling/disabling anything from search results",
+  "sticker_pack": "lidreron",
+  "sticker_index": 57,
+  "sticker_circle": false,
+  "sticker_size": 160,
+  "min_app_version": "12.1.1",
+  "download_url": "https://raw.githubusercontent.com/luvztroy/Auto-Update/refs/heads/main/QuantaHut.plugin",
+  "requires_restart": true,
+  "breaking_changes": false
+}
