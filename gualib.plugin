@@ -1,4 +1,1543 @@
-  self.plugin = plugin
+# Also a big thanks to @QuantaPlugins, We took some code snippets from QuantaHut
+
+
+import json
+import time
+import copy
+import threading
+import traceback
+import os.path
+import tempfile
+import urllib.request
+from typing import List, Callable, Optional, Any
+from dataclasses import dataclass
+
+from base_plugin import BasePlugin, HookStrategy, MenuItemData, MenuItemType
+from android_utils import log, run_on_ui_thread
+from client_utils import get_last_fragment, run_on_queue
+from ui.bulletin import BulletinHelper
+from ui.settings import Divider, Header, Switch, Input, Text, Selector
+
+from org.telegram.messenger import Utilities, AndroidUtilities, MediaDataController, ImageLocation
+from com.exteragram.messenger.utils import ChatUtils
+from java import dynamic_proxy, cast, jclass
+from java.util import ArrayList
+from java.lang import Integer
+from org.telegram.messenger import MessageObject, R as R_tg
+from org.telegram.ui import ChatActivity
+from org.telegram.ui.ActionBar import BottomSheet, Theme, SimpleTextView
+from android.view import HapticFeedbackConstants
+from org.telegram.ui.Components import BackupImageView, LayoutHelper
+from android.view import Gravity
+from android.widget import LinearLayout, TextView, FrameLayout
+from android.util import TypedValue
+from hook_utils import find_class, get_private_field, set_private_field
+from java.io import File
+
+__name__ = "GuALib"
+__description__ = "**Library for GuA** | Based on QuantaHut"
+__icon__ = "GuAIcons/1"
+__id__ = "gualib"
+__version__ = "1.0.1"
+__author__ = "@oxxximif | oxxx1Storm"
+__min_version__ = "12.1.1"
+__priority__ = 1
+
+DEFAULT_SHOW_LOGS = False
+DEFAULT_SHOW_RESTART_MENU = False
+DEFAULT_BRANCH = 0  
+setting_getter = None
+
+
+class QuantaHut(BasePlugin):
+    def __init__(self):
+        super().__init__()
+        self.hook_refs = []
+        self.available_languages = []
+        self.current_language = "en"
+        self.language_available = False
+        self.localization_cache = github_localization.localization_cache
+        self.restart_menu_item = None
+        self.current_filter = 0
+        self.filter_pills = []
+        self.pills_container = None
+        self.stored_context = None
+        self.stored_activity = None
+
+    
+    def log(self, message: str):
+        if self.get_setting("show_logs", DEFAULT_SHOW_LOGS):
+            log(f"[GuALib] {message}")
+    
+    def create_settings(self):
+        show_branch_selector = self.get_setting("show_branch_selector", False)
+        
+        settings = [
+            Header(text=get_text("quantahut_configuration", "GuALib Configuration")),
+            Switch(key="show_logs", text=get_text("enable_debug_logging_quantahut", "Enable Debug Logging"), default=DEFAULT_SHOW_LOGS, icon="menu_intro_solar"),
+            Switch(key="show_restart_menu", text=get_text("quantahut_show_restart", "Show Restart in Drawer"), default=DEFAULT_SHOW_RESTART_MENU, icon="msg_retry", on_change=self._on_restart_toggle_changed),
+            
+            Header(text=get_text("updates", "Updates")),
+            Selector(key="localization_branch", text=get_text("localization_branch", "Localization Branch"), items=[get_text("branch_main", "Main"), get_text("branch_beta", "Beta")], default=DEFAULT_BRANCH, icon="msg_folders"),
+        ]
+        
+        if show_branch_selector:
+            settings.extend([
+                Selector(key="update_branch", text=get_text("update_branch", "Update Branch"), items=[get_text("branch_main", "Main"), get_text("branch_beta", "Beta")], default=DEFAULT_BRANCH, icon="msg_folders"),
+                Divider(text=get_text("update_branch_info", "Select which branch to receive updates from. Beta may contain experimental features.")),
+            ])
+        
+        settings.extend([
+            Header(text=get_text("pluging_engine", "Plugin engine features")),
+            Text(text=get_text("export_all_settings", "Export All Plugin Settings"), icon="msg_photo_rotate_solar", on_click=self._export_all_settings),
+            Text(text=get_text("export_all_plugins", "Export All Plugins"), icon="msg_photo_rotate_solar", on_click=self._export_all_plugins),
+    
+            Header(text=get_text("cleanup", "Cleanup & Reset")),
+            Text(text=get_text("clear_file_cache", "Clear File Cache"), red=True, on_click=self._clear_file_cache, icon="msg_delete"),
+            Text(text=get_text("reset_language_preference", "Reset Language Preference"), red=True, on_click=self._reset_language_preference, on_long_click=self._toggle_branch_selector, icon="msg_delete"),
+            Divider(text=self._get_cache_info_text()),
+        ])
+        
+        return settings
+
+    def on_plugin_load(self):
+        self.log("Initializing QuantaHut...")
+        global setting_getter
+        setting_getter = self.get_setting
+        QuantaHut.instance = self
+
+        self.custom_badges = {}
+        self.badge_hook_ref = None
+        self.developer_hook_ref = None
+        self.extera_hook_ref = None
+        self.TLRPC_User = None
+        self.TLRPC_Chat = None
+        
+        self.update_available = False
+        self.latest_version = None
+        self.changelog = None
+        self.download_url = None
+        self.checking_update = False
+        
+        self.setup_hooks()
+        self._update_restart_menu_item()
+        self._setup_quanta_file_hook()
+        
+        self._setup_deeplink_handling()
+        self._setup_enhanced_plugin_search()
+        
+        self._check_language_availability_on_load()
+        self._load_available_languages()
+        
+        self.log("QuantaHut initialized with GitHub-based system")
+        
+        self._check_for_updates_on_load()
+
+    def _check_language_availability_on_load(self):
+        def check_availability():
+            try:
+                try:
+                    from org.telegram.messenger import LocaleController
+                    current_language = LocaleController.getInstance().getCurrentLocaleInfo().getLangCode()
+                except:
+                    current_language = "en"
+                
+                import urllib.request
+                branch = self._get_selected_branch()
+                github_url = f"https://raw.githubusercontent.com/oxxxiStorm/GuA/refs/heads/main/GuA%20{current_language}.json"
+                
+                try:
+                    with urllib.request.urlopen(github_url) as response:
+                        if response.getcode() == 200:
+                            self.language_available = True
+                            quantahut_log(f"Language {current_language} is available")
+                        else:
+                            self.language_available = False
+                            quantahut_log(f"Language {current_language} is not available")
+                except Exception as e:
+                    self.language_available = False
+                    if "404" in str(e) or "Not Found" in str(e):
+                        quantahut_log(f"Language {current_language} is not available")
+                    else:
+                        quantahut_log(f"Language {current_language} is not available (network error: {e})")
+            except Exception as e:
+                self.language_available = False
+                quantahut_log(f"Error checking language availability: {e}")
+        
+        import threading
+        thread = threading.Thread(target=check_availability)
+        thread.daemon = True
+        thread.start()
+
+    def _setup_deeplink_handling(self):
+        try:
+            LaunchActivity = find_class("org.telegram.ui.LaunchActivity")
+            if LaunchActivity:
+                method = LaunchActivity.getClass().getDeclaredMethod("handleIntent", 
+                    find_class("android.content.Intent").getClass(),
+                    find_class("java.lang.Boolean").TYPE,
+                    find_class("java.lang.Boolean").TYPE,
+                    find_class("java.lang.Boolean").TYPE,
+                    find_class("org.telegram.messenger.browser.Browser$Progress").getClass(),
+                    find_class("java.lang.Boolean").TYPE,
+                    find_class("java.lang.Boolean").TYPE)
+                method.setAccessible(True)
+                self.hook_refs.append(self.hook_method(method, QuantaDeeplinkHook(self)))
+        except Exception as e:
+            self.log(f"Error setting up deeplink handling: {e}")
+
+    def _setup_enhanced_plugin_search(self):
+        try:
+            from base_plugin import MethodHook
+            from com.exteragram.messenger.plugins import PluginsController
+            
+            class PluginSearchHook(MethodHook):
+                def __init__(self, quantahut):
+                    self.quantahut = quantahut
+                    self.matched_plugins = []
+                    
+                def before_hooked_method(self, param):
+                    try:
+                        activity = param.thisObject
+                        searching = get_private_field(activity, "searching")
+                        query = get_private_field(activity, "query")
+                        
+                        if not searching or not query:
+                            self.matched_plugins = []
+                            return
+                            
+                        query_lower = str(query).lower()
+                        
+                        plugins_controller = PluginsController.getInstance()
+                        all_plugins = plugins_controller.plugins
+                        
+                        self.matched_plugins = []
+                        keys_array = all_plugins.keySet().toArray()
+                        
+                        for i in range(len(keys_array)):
+                            key = keys_array[i]
+                            plugin = all_plugins.get(key)
+                            if self.quantahut._matches_plugin_search(plugin, query_lower):
+                                self.matched_plugins.append(plugin)
+                        
+                        for plugin in self.matched_plugins:
+                            try:
+                                name_field = plugin.getClass().getDeclaredField("name")
+                                name_field.setAccessible(True)
+                                original_name = name_field.get(plugin)
+                                name_field.set(plugin, f"{original_name} {query_lower}")
+                            except:
+                                break
+                        
+                    except Exception as e:
+                        self.quantahut.log(f"Plugin search error: {e}")
+                
+                def after_hooked_method(self, param):
+                    try:
+                        items = param.args[0]
+                        activity = param.thisObject
+                        
+                        for plugin in self.matched_plugins:
+                            try:
+                                name_field = plugin.getClass().getDeclaredField("name")
+                                name_field.setAccessible(True)
+                                current_name = str(name_field.get(plugin))
+                                if " " in current_name:
+                                    original_name = current_name.rsplit(" ", 1)[0]
+                                    name_field.set(plugin, original_name)
+                            except:
+                                pass
+                        self.matched_plugins = []
+                        
+                        searching = get_private_field(activity, "searching")
+                        if searching:
+                            return
+                        
+                        current_filter = self.quantahut.current_filter
+                        if current_filter != 0:
+                            plugins_controller = PluginsController.getInstance()
+                            plugin_items = []
+                            other_items = []
+                            PLUGIN_ID = 1
+                            
+                            for i in range(items.size()):
+                                item = items.get(i)
+                                if hasattr(item, 'id') and item.id == PLUGIN_ID:
+                                    plugin_items.append(item)
+                                else:
+                                    other_items.append(item)
+                            
+                            filtered_items = []
+                            for item in plugin_items:
+                                plugin = item.plugin
+                                if current_filter == 1 and plugin.isEnabled():
+                                    filtered_items.append(item)
+                                elif current_filter == 2 and not plugin.isEnabled():
+                                    filtered_items.append(item)
+                                elif current_filter == 3 and self.quantahut._is_recently_updated(plugin):
+                                    filtered_items.append(item)
+                                elif current_filter == 4 and plugins_controller.hasPluginSettings(plugin.getId()):
+                                    filtered_items.append(item)
+                                elif current_filter == 5 and plugin.hasError():
+                                    filtered_items.append(item)
+                            
+                            items.clear()
+                            for item in other_items:
+                                items.add(item)
+                            for item in filtered_items:
+                                items.add(item)
+                        
+                        if self.quantahut.pills_container and items.size() > 0:
+                            from org.telegram.ui.Components import UItem
+                            try:
+                                pills_item = UItem.asCustom(self.quantahut.pills_container)
+                                insert_position = 1 if items.size() > 1 else items.size()
+                                items.add(insert_position, pills_item)
+                            except:
+                                pass
+                    except:
+                        pass
+            
+            class CreateViewHook(MethodHook):
+                def __init__(self, quantahut):
+                    self.quantahut = quantahut
+                
+                def after_hooked_method(self, param):
+                    try:
+                        activity = param.thisObject
+                        context = param.args[0]
+                        self.quantahut.stored_context = context
+                        self.quantahut.stored_activity = activity
+                        self.quantahut._add_filter_pills(activity)
+                        run_on_ui_thread(lambda: self.quantahut._refresh_plugins_list(activity))
+                    except:
+                        pass
+            
+            PluginsActivityClass = find_class("com.exteragram.messenger.plugins.ui.PluginsActivity")
+            if PluginsActivityClass:
+                ContextClass = find_class("android.content.Context")
+                create_view_method = PluginsActivityClass.getClass().getDeclaredMethod("createView", ContextClass)
+                create_view_method.setAccessible(True)
+                self.hook_refs.append(self.hook_method(create_view_method, CreateViewHook(self)))
+                
+                ArrayListClass = find_class("java.util.ArrayList")
+                UniversalAdapterClass = find_class("org.telegram.ui.Components.UniversalAdapter")
+                
+                fill_items_method = PluginsActivityClass.getClass().getDeclaredMethod(
+                    "fillItems", ArrayListClass, UniversalAdapterClass
+                )
+                fill_items_method.setAccessible(True)
+                self.hook_refs.append(self.hook_method(fill_items_method, PluginSearchHook(self)))
+                self.log("Enhanced plugin search enabled")
+        except Exception as e:
+            self.log(f"Failed to setup enhanced plugin search: {e}")
+    
+    def _matches_plugin_search(self, plugin, query):
+        try:
+            searchable = f"{plugin.getName()} {plugin.getAuthor()} {plugin.getDescription()} {plugin.getId()} {plugin.getVersion()}".lower()
+            return query in searchable
+        except:
+            return False
+    
+    def _get_selected_branch(self):
+        branch_index = self.get_setting("localization_branch", DEFAULT_BRANCH)
+        return "main" if branch_index == 0 else "Beta"
+    
+    def _on_restart_toggle_changed(self, enabled):
+        try:
+            self.set_setting("show_restart_menu", bool(enabled))
+        except Exception:
+            pass
+        self._update_restart_menu_item()
+
+    def _update_restart_menu_item(self):
+        try:
+            enabled = self.get_setting("show_restart_menu", DEFAULT_SHOW_RESTART_MENU)
+
+            if enabled:
+                if not self.restart_menu_item:
+                    self.restart_menu_item = self.add_menu_item(MenuItemData(
+                        menu_type=MenuItemType.DRAWER_MENU,
+                        text=get_text("quantahut_restart_drawer", "Restart App"),
+                        icon="msg_retry",
+                        priority=150,
+                        on_click=self._on_restart_menu_clicked,
+                    ))
+            else:
+                if self.restart_menu_item:
+                    self.remove_menu_item(self.restart_menu_item)
+                    self.restart_menu_item = None
+        except Exception:
+            pass
+
+    def _on_restart_menu_clicked(self, context):
+        try:
+            fragment = get_last_fragment()
+            restart_app(fragment)
+        except Exception as e:
+            quantahut_log(f"Error restarting app: {e}")
+
+    def _show_gua_support(self):
+        showupdatebottomsheet(
+            title="About Donations",
+            subtitle="Supporting GuA Development",
+            description="If you want to support the development of GuA, write to @oxxximif and ask about the current translation method. You can also simply make a gift to @oxxximif on Telegram.\n\nSupporting the project gives you the support status, and you can write to @oxxximif in private messages for more information.",
+            github_url=None,
+            plugin_name="GuA_DonationInfo",
+            sticker_pack="GuAicons",
+            sticker_index=1,
+            button_text="Understood",
+            bottom_text="Thank you for considering supporting the development of GuA!",
+            show_language_selector=False,
+            show_user_avatar=False,
+            description_centered=True
+        )
+
+    def _show_quanta_bottom_sheet(self):
+        try:
+            quantahut_log("Showing Quanta bottom sheet...")
+            
+            try:
+                from org.telegram.messenger import LocaleController
+                current_language = LocaleController.getInstance().getCurrentLocaleInfo().getLangCode()
+            except:
+                current_language = "en"
+            
+            try:
+                from java.util import Locale
+                locale = Locale(current_language)
+                language_name = locale.getDisplayLanguage(locale)
+            except:
+                language_name = current_language.title()
+            
+            quantahut_log(f"Language detected: {current_language}")
+            
+            if hasattr(self, 'language_available') and self.language_available:
+                branch = self._get_selected_branch()
+                showupdatebottomsheet(
+                    title=get_text("download_localization", "Download Localization"),
+                    subtitle=get_text("current_language_detected", "Current language detected: {language}").format(language=current_language.lower()) if get_text("current_language_detected") else f"Current language detected: {current_language.lower()}",
+                    description=get_text("unlock_uitweaks_description", "Unlock UiTweaks in {language} for a seamless experience.").format(language=language_name) if get_text("unlock_uitweaks_description") else f"Unlock UiTweaks in {language_name} for a seamless experience.",
+                    github_url=f"https://raw.githubusercontent.com/oxxxiStorm/GuA/refs/heads/main/GuA%20{current_language}.json",
+                    plugin_name="UiTweaks_Localization",
+                    sticker_pack="luvztroyIcons",
+                    sticker_index=13,
+                    button_text=get_text("download", "Download"),
+                    bottom_text=get_text("localization_bottom_text", "This process only happens once. After downloading, the files are saved locally to give you seamless access to UiTweaks in your language anytime."),
+                    show_language_selector=False,
+                    available_languages=self.available_languages,
+                    description_centered=True
+                )
+            else:
+                showupdatebottomsheet(
+                    title=get_text("localization_not_available", "Localization Not Available"),
+                    subtitle=get_text("current_language_detected", "Current language detected: {language}").format(language=current_language.lower()) if get_text("current_language_detected") else f"Current language detected: {current_language.lower()}",
+                    description=get_text("localization_not_available_description", "UiTweaks localization for {language} is not available yet.").format(language=language_name) if get_text("localization_not_available_description") else f"UiTweaks localization for {language_name} is not available yet.",
+                    github_url=None,
+                    plugin_name="UiTweaks_Localization",
+                    sticker_pack="luvztroyIcons",
+                    sticker_index=13,
+                    button_text=get_text("continue", "Continue"),
+                    bottom_text=get_text("localization_continue_text", "You can still use UiTweaks in English, or select a different language from the language selector button."),
+                    show_language_selector=True,
+                    available_languages=self.available_languages,
+                    description_centered=True
+                )
+            
+        except Exception as e:
+            quantahut_log(f"Error in _show_quanta_bottom_sheet: {e}")
+
+    def setup_hooks(self):
+        try:
+            _ensure_message_menu_hooks(self)
+            self._setup_custom_badges_hooks()
+            self._setup_plugin_settings_search()
+            
+        except Exception as e:
+            self.log(f"setup_hooks error: {str(e)}")
+
+    def _setup_plugin_settings_search(self):
+        try:
+            plugin_settings_class = find_class("com.exteragram.messenger.plugins.ui.PluginSettingsActivity")
+            if not plugin_settings_class:
+                return
+            
+            context_class = find_class("android.content.Context")
+            if context_class:
+                try:
+                    create_view_method = plugin_settings_class.getClass().getDeclaredMethod("createView", context_class.getClass())
+                    create_view_method.setAccessible(True)
+                    self.hook_refs.append(self.hook_method(create_view_method, _PluginSearchCreateViewHook(self)))
+                except:
+                    pass
+            
+            try:
+                ArrayList = jclass("java.util.ArrayList")
+                UniversalAdapter = jclass("org.telegram.ui.Components.UniversalAdapter")
+                fill_items_method = plugin_settings_class.getClass().getDeclaredMethod("fillItems", ArrayList, UniversalAdapter)
+                fill_items_method.setAccessible(True)
+                self.hook_refs.append(self.hook_method(fill_items_method, _PluginSearchFillItemsHook(self)))
+            except:
+                pass
+            
+            try:
+                UItem = jclass("org.telegram.ui.Components.UItem")
+                View = jclass("android.view.View")
+                on_long_click_method = plugin_settings_class.getClass().getDeclaredMethod("onLongClick", UItem, View, jclass("java.lang.Integer").TYPE, jclass("java.lang.Float").TYPE, jclass("java.lang.Float").TYPE)
+                on_long_click_method.setAccessible(True)
+                self.hook_refs.append(self.hook_method(on_long_click_method, _PluginSettingsLongClickHook(self)))
+            except:
+                pass
+        except:
+            pass
+
+    def _clear_file_cache(self, view):
+        github_localization.localization_cache.wipe()
+        run_on_ui_thread(lambda: BulletinHelper.show_success("Cache cleared successfully"))
+
+    def _reset_language_preference(self, view):
+        try:
+            from base_plugin import PluginsController
+            from hook_utils import get_private_field
+            from ui.bulletin import BulletinHelper
+            prefs = get_private_field(PluginsController.getInstance(), "preferences")
+            prefs.edit().remove("plugin_setting_ui_tweaks_selected_language").apply()
+            run_on_ui_thread(lambda: BulletinHelper.show_success(get_text("language_pref_reset_success", "Language preference has been reset")))
+        except Exception as e:
+            try:
+                from ui.bulletin import BulletinHelper
+                run_on_ui_thread(lambda: BulletinHelper.show_error(get_text("language_pref_reset_failed", "Failed to reset language preference")))
+            except Exception:
+                pass
+            quantahut_log(f"Error resetting language preference: {e}")
+
+    def _get_cache_info_text(self):
+        try:
+            languages = set()
+            string_count = 0
+            for key in github_localization.localization_cache.content.keys():
+                if key.endswith('_timestamp'):
+                    lang = key.split('_')[-2] if '_' in key else 'unknown'
+                    languages.add(lang)
+                elif '_' in key and not key.endswith('_timestamp'):
+                    string_count += 1
+            
+            info_parts = []
+            
+            if languages:
+                formatted_langs = []
+                for lang in sorted(languages):
+                    try:
+                        from java.util import Locale
+                        locale = Locale(lang)
+                        formatted_langs.append(locale.getDisplayLanguage(locale).title())
+                    except:
+                        formatted_langs.append(lang.upper())
+                
+                lang_text = ', '.join(formatted_langs)
+                info_parts.append(get_text("cache_info", "Cached {count} strings across languages: {languages}").format(count=string_count, languages=lang_text))
+            
+            if not info_parts:
+                return get_text("cache_info", "No cached data")
+            
+            return " | ".join(info_parts)
+        except Exception as e:
+            quantahut_log(f"Error getting cache info: {e}")
+            return get_text("cache_info", "Cache status unavailable")
+
+    def register_message_context_menu_item(self, *args, **kwargs):
+        return utilities.register_message_menu_item(*args, **kwargs)
+
+    def unregister_message_context_menu_item(self, handle):
+        return utilities.unregister_message_menu_item(handle)
+
+    def _check_for_updates_on_load(self):
+        quantahut_log("Auto-checking for QuantaHut updates...")
+        self._check_for_updates(show_on_load=True)
+    
+    def _check_for_updates(self, show_on_load=False):
+        if self.checking_update:
+            quantahut_log("Already checking for updates...")
+            return
+        
+        self.checking_update = True
+        
+        def check_thread():
+            try:
+                quantahut_log("Checking for QuantaHut updates from GitHub...")
+                
+                branch_index = self.get_setting("update_branch", 0)
+                branch = "main" if branch_index == 0 else "Beta"
+                
+                version_url = f"https://raw.githubusercontent.com/oxxx1mif/gua-auto-update/refs/heads/main/gua_changelog.json"
+                quantahut_log(f"Fetching from {branch} branch: {version_url}")
+                
+                with urllib.request.urlopen(version_url, timeout=10) as response:
+                    if response.getcode() != 200:
+                        raise Exception(f"HTTP {response.getcode()}")
+                    
+                    version_data = json.loads(response.read().decode('utf-8'))
+                    
+                    self.latest_version = version_data.get("version", "0.0.0")
+                    self.changelog = version_data.get("changelog_text", "No changelog available")
+                    sticker_pack = version_data.get("sticker_pack")
+                    sticker_index = version_data.get("sticker_index")
+                    sticker_circle = version_data.get("sticker_circle", False)
+                    sticker_size = version_data.get("sticker_size", 160)
+                    
+                    self.download_url = f"https://raw.githubusercontent.com/oxxx1mif/gua-auto-update/refs/heads/main/gualib.plugin"
+                    
+                    quantahut_log(f"Latest version: {self.latest_version}")
+                    quantahut_log(f"Current version: {__version__}")
+                    
+                    if self._is_newer_version(self.latest_version, __version__):
+                        self.update_available = True
+                        quantahut_log("QuantaHut update available!")
+                        
+                        if show_on_load:
+                            run_on_ui_thread(lambda: self._show_update_bottom_sheet(
+                                sticker_pack, sticker_index, sticker_circle, sticker_size
+                            ))
+                    else:
+                        self.update_available = False
+                        quantahut_log("QuantaHut is up to date")
+                
+            except Exception as e:
+                quantahut_log(f"Error checking QuantaHut updates: {e}")
+            finally:
+                self.checking_update = False
+        
+        thread = threading.Thread(target=check_thread)
+        thread.daemon = True
+        thread.start()
+    
+    def _is_newer_version(self, latest: str, current: str) -> bool:
+        try:
+            def clean_version(version):
+                version = version.split('-')[0].split(' ')[0].strip()
+                return version
+            
+            latest_clean = clean_version(latest)
+            current_clean = clean_version(current)
+            
+            latest_parts = [int(x) for x in latest_clean.split('.')]
+            current_parts = [int(x) for x in current_clean.split('.')]
+            
+            max_len = max(len(latest_parts), len(current_parts))
+            latest_parts += [0] * (max_len - len(latest_parts))
+            current_parts += [0] * (max_len - len(current_parts))
+            
+            return latest_parts > current_parts
+        except Exception as e:
+            quantahut_log(f"Error comparing versions: {e}")
+            return False
+    
+    def _show_update_bottom_sheet(self, sticker_pack, sticker_index, sticker_circle, sticker_size):
+        if not self.update_available:
+            return
+        
+        quantahut_log("Showing QuantaHut update bottom sheet")
+        
+        try:
+            showupdatebottomsheet(
+                title=f"gualib update: v{self.latest_version}",
+                subtitle=f"Current version: {__version__}",
+                description=self.changelog,
+                sticker_pack=sticker_pack,
+                sticker_index=sticker_index,
+                sticker_circle=sticker_circle,
+                sticker_size=sticker_size,
+                button_text="Update Now",
+                show_close_button=False,
+                description_centered=False,
+                on_button_click=self._download_and_install_update
+            )
+        except Exception as e:
+            quantahut_log(f"Error showing QuantaHut update sheet: {e}")
+    
+    def _download_and_install_update(self):
+        quantahut_log("Starting gualib update download...")
+        BulletinHelper.show_info("Downloading gualib update...")
+        
+        def download_thread():
+            try:
+                quantahut_log(f"Downloading from: {self.download_url}")
+                
+                with urllib.request.urlopen(self.download_url, timeout=30) as response:
+                    if response.getcode() != 200:
+                        raise Exception(f"HTTP {response.getcode()}")
+                    
+                    plugin_content = response.read()
+                    quantahut_log(f"Downloaded {len(plugin_content)} bytes")
+                
+                from com.exteragram.messenger.plugins import PluginsController
+                from org.telegram.messenger import ApplicationLoader
+                
+                app_context = ApplicationLoader.applicationContext
+                files_dir = app_context.getFilesDir()
+                plugins_dir = os.path.join(str(files_dir), "plugins")
+                
+                plugin_file = os.path.join(plugins_dir, "gualib.py")
+                
+                quantahut_log(f"Installing to: {plugin_file}")
+                
+                with open(plugin_file, 'wb') as f:
+                    f.write(plugin_content)
+                
+                quantahut_log("QuantaHut updated successfully!")
+                
+                success_msg = f"gualib updated to v{self.latest_version}! Restart required."
+                run_on_ui_thread(lambda: BulletinHelper.show_success(success_msg))
+                
+                run_on_ui_thread(self._show_restart_prompt)
+                
+            except Exception as e:
+                error_msg = f"gualib update failed: {str(e)}"
+                quantahut_log(f"Error downloading update: {e}")
+                run_on_ui_thread(lambda msg=error_msg: BulletinHelper.show_error(msg))
+        
+        thread = threading.Thread(target=download_thread)
+        thread.daemon = True
+        thread.start()
+    
+    def _show_restart_prompt(self):
+        try:
+            show_restart_bulletin(
+                message="Restart app to apply gualib update",
+                button_text=get_text("restart", "Restart")
+            )
+        except Exception as e:
+            quantahut_log(f"Error showing restart bulletin: {e}")
+
+    def on_plugin_unload(self):
+        for ref in self.hook_refs:
+            if ref:
+                try:
+                    self.unhook_method(ref)
+                except:
+                    pass
+        self.hook_refs.clear()
+        
+        if self.badge_hook_ref:
+            self.unhook_method(self.badge_hook_ref)
+            self.badge_hook_ref = None
+        if self.developer_hook_ref:
+            self.unhook_method(self.developer_hook_ref)
+            self.developer_hook_ref = None
+        if self.extera_hook_ref:
+            self.unhook_method(self.extera_hook_ref)
+            self.extera_hook_ref = None
+        
+        self.log("Plugin unloading...")
+
+    def _setup_custom_badges_hooks(self):
+        try:
+            self._cache_classes()
+            self._setup_badge_hook()
+            self._load_custom_badges()
+        except Exception as e:
+            self.log(f"Error setting up custom badges hooks: {e}")
+            
+    def _cache_classes(self):
+        try:
+            self.TLRPC_User = find_class("org.telegram.tgnet.TLRPC$User")
+            self.TLRPC_Chat = find_class("org.telegram.tgnet.TLRPC$Chat")
+        except Exception as e:
+            pass
+            
+    def _setup_badge_hook(self):
+        try:
+            BadgesController = find_class("com.exteragram.messenger.badges.BadgesController")
+            if not BadgesController:
+                return
+                
+            TLObject = find_class("org.telegram.tgnet.TLObject")
+            method = BadgesController.getClass().getDeclaredMethod("getBadge", TLObject)
+            method.setAccessible(True)
+            
+            self.badge_hook_ref = self.hook_method(method, CustomBadgeHook(self))
+            
+            TLRPC_User = find_class("org.telegram.tgnet.TLRPC$User")
+            if TLRPC_User:
+                is_developer_method = BadgesController.getClass().getDeclaredMethod("isDeveloper", TLRPC_User)
+                is_developer_method.setAccessible(True)
+                self.developer_hook_ref = self.hook_method(is_developer_method, CustomDeveloperHook(self))
+            
+            TLRPC_Chat = find_class("org.telegram.tgnet.TLRPC$Chat")
+            if TLRPC_Chat:
+                is_extera_method = BadgesController.getClass().getDeclaredMethod("isExtera", TLRPC_Chat)
+                is_extera_method.setAccessible(True)
+                self.extera_hook_ref = self.hook_method(is_extera_method, CustomExteraHook(self))
+            
+        except Exception as e:
+            pass
+            
+    def _load_custom_badges(self):
+        try:
+            self.custom_badges.clear()
+            import threading
+            thread = threading.Thread(target=self._fetch_and_process_badges)
+            thread.daemon = True
+            thread.start()
+        except Exception as e:
+            pass
+            
+    def _fetch_and_process_badges(self):
+        try:
+            should_refresh = self._should_refresh_quantaconfig()
+            badges_data = self._load_badges_from_config(force_refresh=should_refresh)
+            if not badges_data:
+                return
+                
+            BadgeDTO = find_class("com.exteragram.messenger.api.dto.BadgeDTO")
+            if not BadgeDTO:
+                return
+                
+            for badge_info in badges_data:
+                badge_id = badge_info.get('id')
+                user_id = badge_info.get('user_id')
+                chat_id = badge_info.get('chat_id')
+                emoji_id = badge_info.get('emoji_id')
+                text_template = badge_info.get('text_template')
+                
+                if user_id and emoji_id and text_template:
+                    user_name = self._get_user_name(user_id)
+                    custom_text = text_template.format(user_name=user_name)
+                    badge_dto = BadgeDTO(emoji_id, custom_text)
+                    self.custom_badges[user_id] = badge_dto
+                    
+                elif chat_id and emoji_id and text_template:
+                    chat_name = self._get_chat_name(chat_id)
+                    custom_text = text_template.format(chat_name=chat_name)
+                    badge_dto = BadgeDTO(emoji_id, custom_text)
+                    self.custom_badges[chat_id] = badge_dto
+                    
+        except Exception as e:
+            pass
+
+    def _process_badges_from_data(self, badges_data):
+        try:
+            BadgeDTO = find_class("com.exteragram.messenger.api.dto.BadgeDTO")
+            if not BadgeDTO:
+                return
+                
+            for badge_info in badges_data:
+                badge_id = badge_info.get('id')
+                user_id = badge_info.get('user_id')
+                chat_id = badge_info.get('chat_id')
+                emoji_id = badge_info.get('emoji_id')
+                text_template = badge_info.get('text_template')
+                
+                if user_id and emoji_id and text_template:
+                    user_name = self._get_user_name(user_id)
+                    custom_text = text_template.format(user_name=user_name)
+                    badge_dto = BadgeDTO(emoji_id, custom_text)
+                    self.custom_badges[user_id] = badge_dto
+                    
+                elif chat_id and emoji_id and text_template:
+                    chat_name = self._get_chat_name(chat_id)
+                    custom_text = text_template.format(chat_name=chat_name)
+                    badge_dto = BadgeDTO(emoji_id, custom_text)
+                    self.custom_badges[chat_id] = badge_dto
+                    
+        except Exception as e:
+            pass
+            
+    def _should_refresh_guabadges(self, max_age_hours=1):
+        try:
+            timestamp_key = "guabedjs_timestamp"
+            cached_timestamp = github_localization.get_text_template(timestamp_key)
+            
+            if not cached_timestamp:
+                return True
+            
+            cached_time = float(cached_timestamp)
+            current_time = time.time()
+            age_hours = (current_time - cached_time) / 3600
+            
+            if age_hours > max_age_hours:
+                return True
+            
+            return False
+            
+        except Exception as e:
+            quantahut_log(f"Error checking guabedjs cache age: {e}")
+            return True
+
+    def _load_badges_from_config(self, force_refresh=False):
+        try:
+            cache_key = "guabedjs_badges"
+            timestamp_key = "guabedjs_timestamp"
+            
+            if not force_refresh:
+                cached_badges = github_localization.get_text_template(cache_key)
+                if cached_badges:
+                    try:
+                        return json.loads(cached_badges)
+                    except:
+                        pass
+
+            quantahut_log("Downloading GuAbedjConfig from oxxxiStorm/Gua-Archive...")
+
+            github_url = "https://raw.githubusercontent.com/oxxxiStorm/Gua-Archive/main/GuAbedjConfig.json"
+            
+            with urllib.request.urlopen(github_url, timeout=15) as response:
+                if response.getcode() != 200:
+                    quantahut_log(f"GuAbedjConfig HTTP error: {response.getcode()}")
+                    return []
+                raw_data = response.read().decode('utf-8')
+                data = json.loads(raw_data)
+                badges = data.get('badges', [])
+                
+                github_localization.cache_text_template(cache_key, json.dumps(badges))
+                github_localization.cache_text_template(timestamp_key, str(time.time()))
+                quantahut_log("GuAbedjConfig successfully loaded and cached")
+                return badges
+                
+        except Exception as e:
+            quantahut_log(f"Failed to load GuAbedjConfig: {e}")
+            return []
+
+    def _fetch_and_process_badges(self):
+        try:
+            should_refresh = self._should_refresh_guabadges()
+            badges_data = self._load_badges_from_config(force_refresh=should_refresh)
+            if badges_data:
+                self._process_badges_from_data(badges_data)
+            else:
+                quantahut_log("No badges data received (empty or error)")
+        except Exception as e:
+            quantahut_log(f"GuAbedj badge fetch error: {e}")
+            
+    def _get_user_name(self, user_id):
+        try:
+            from client_utils import get_messages_controller
+            from org.telegram.messenger import UserObject
+            user_obj = get_messages_controller().getUser(user_id)
+            return UserObject.getUserName(user_obj) if user_obj else 'this user'
+        except Exception as e:
+            return 'this user'
+            
+    def _get_chat_name(self, chat_id):
+        try:
+            from client_utils import get_messages_controller
+            chat_obj = get_messages_controller().getChat(chat_id)
+            return chat_obj.title if chat_obj and hasattr(chat_obj, 'title') else 'this chat'
+        except Exception as e:
+            return 'this chat'
+
+    def _load_available_languages(self):
+        if hasattr(self, '_languages_loading') and self._languages_loading:
+            return
+        if self.available_languages:
+            return
+            
+        self._languages_loading = True
+        
+        def load_languages_background():
+            try:
+                import urllib.request, json, re
+                with urllib.request.urlopen("https://api.github.com/repos/luvztroy/UiTweaks/contents/") as response:
+                    data = json.loads(response.read().decode('utf-8'))
+                    languages = []
+                    for file_info in data:
+                        if file_info.get('type') == 'file' and file_info.get('name', '').startswith('UiTweaks ') and file_info.get('name', '').endswith('.json'):
+                            filename = file_info['name']
+                            match = re.search(r'UiTweaks (.+)\.json$', filename)
+                            if match:
+                                lang_code = match.group(1)
+                                try:
+                                    from java.util import Locale
+                                    locale = Locale(lang_code)
+                                    display_name = locale.getDisplayLanguage(locale).title()
+                                except:
+                                    display_name = lang_code.upper()
+                                languages.append({'code': lang_code, 'display_name': display_name})
+                    languages.sort(key=lambda x: x['display_name'])
+                    
+                    from android_utils import run_on_ui_thread
+                    def update_languages():
+                        self.available_languages = languages
+                        global available_languages
+                        available_languages = languages
+                        self._languages_loading = False
+                        quantahut_log(f"Loaded {len(languages)} available languages")
+                    run_on_ui_thread(update_languages)
+            except Exception as e:
+                quantahut_log(f"Error loading available languages: {e}")
+                self._languages_loading = False
+        
+        import threading
+        import time
+        def delayed_load():
+            time.sleep(0.5)
+            load_languages_background()
+        
+        thread = threading.Thread(target=delayed_load)
+        thread.daemon = True
+        thread.start()
+
+    def _setup_quanta_file_hook(self):
+        try:
+            from java.lang import Class
+            from java import jclass
+            AndroidUtilitiesClass = Class.forName("org.telegram.messenger.AndroidUtilities")
+            MessageObjectClass = Class.forName("org.telegram.messenger.MessageObject")
+            ActivityClass = Class.forName("android.app.Activity")
+            ResourcesProviderClass = Class.forName("org.telegram.ui.ActionBar.Theme$ResourcesProvider")
+            open_for_view = AndroidUtilitiesClass.getDeclaredMethod(
+                "openForView",
+                MessageObjectClass,
+                ActivityClass,
+                ResourcesProviderClass,
+                jclass("java.lang.Boolean").TYPE,
+            )
+            open_for_view.setAccessible(True)
+            class OpenForViewHook:
+                def __init__(hook_self):
+                    hook_self.plugin = self
+                def before_hooked_method(hook_self, param):
+                    try:
+                        if len(param.args) >= 1:
+                            msg = param.args[0]
+                            if msg and hasattr(msg, "getDocumentName"):
+                                name = msg.getDocumentName()
+                                if name:
+                                    name_lower = str(name).lower()
+                                    if name_lower.endswith(".backup"):
+                                        hook_self.plugin.log(f"Detected .backup file click: {name}")
+                                        hook_self.plugin._show_import_bottom_sheet(msg)
+                                        param.setResult(False)
+                                    elif name_lower.endswith(".plugins"):
+                                        hook_self.plugin.log(f"Detected .plugins file click: {name}")
+                                        hook_self.plugin._show_import_plugins_bottom_sheet(msg)
+                                        param.setResult(False)
+                    except Exception as e:
+                        pass
+            self.hook_refs.append(self.hook_method(open_for_view, OpenForViewHook()))
+        except Exception as e:
+            pass
+
+    def _show_import_bottom_sheet(self, message_object):
+        def show_sheet():
+            try:
+                from com.exteragram.messenger.utils import ChatUtils
+                from file_utils import read_file
+                from com.exteragram.messenger.plugins import PluginsController
+                
+                changes_count = 0
+                try:
+                    file_path = ChatUtils.getInstance().getPathToMessage(message_object)
+                    if file_path:
+                        content = read_file(file_path)
+                        if content:
+                            backup_data = json.loads(content)
+                            all_settings = backup_data.get("plugins", {})
+                            controller = PluginsController.getInstance()
+                            
+                            for plugin_id, plugin_data in all_settings.items():
+                                if controller.plugins.containsKey(plugin_id):
+                                    settings = plugin_data.get("settings", {})
+                                    engine = controller.getPluginEngine(plugin_id)
+                                    if engine and settings:
+                                        current_settings = engine.getAllPluginSettings(plugin_id)
+                                        for key, value in settings.items():
+                                            current_value = current_settings.get(key) if current_settings else None
+                                            if current_value != value:
+                                                changes_count += 1
+                except Exception:
+                    changes_count = 1
+                
+                if changes_count == 0:
+                    BulletinHelper.show_error(get_text("settings_same_as_current", "It looks like the settings are the same as the current ones."))
+                    return
+                
+                subtitle = get_text("changes_will_be_applied_singular", "{count} change will be applied to the current settings.").format(count=changes_count) if changes_count == 1 else get_text("changes_will_be_applied_plural", "{count} changes will be applied to the current settings.").format(count=changes_count)
+                
+                def on_import_click():
+                    self._import_from_message(message_object)
+                
+                showupdatebottomsheet(
+                    title=get_text("apply_settings_confirmation", "Are you sure you want to apply these settings?"),
+                    subtitle=subtitle,
+                    button_text=get_text("yes_apply", "Yes, apply"),
+                    button2_text=get_text("no_leave_as_is", "No, leave as is"),
+                    show_close_button=False,
+                    raw_resource=R_tg.raw.email_check_inbox,
+                    on_button_click=on_import_click,
+                    on_button2_click=lambda: None
+                )
+                
+            except Exception as e:
+                pass
+        
+        run_on_ui_thread(show_sheet)
+
+    def _import_from_message(self, message_object):
+        try:
+            from com.exteragram.messenger.utils import ChatUtils
+            from file_utils import read_file
+            from com.exteragram.messenger.plugins import PluginsController
+            
+            file_path = ChatUtils.getInstance().getPathToMessage(message_object)
+            if not file_path:
+                return
+            
+            content = read_file(file_path)
+            if not content:
+                return
+            
+            backup_data = json.loads(content)
+            all_settings = backup_data.get("plugins", {})
+            controller = PluginsController.getInstance()
+            imported_count = 0
+            
+            for plugin_id, plugin_data in all_settings.items():
+                if controller.plugins.containsKey(plugin_id):
+                    settings = plugin_data.get("settings", {})
+                    engine = controller.getPluginEngine(plugin_id)
+                    
+                    if engine and settings:
+                        for key, value in settings.items():
+                            try:
+                                engine.setPluginSetting(plugin_id, key, value)
+                                imported_count += 1
+                            except Exception:
+                                pass
+                        
+                        controller.loadPluginSettings(plugin_id)
+            
+            BulletinHelper.show_success(get_text("imported_settings_from_plugins", "Imported settings from {count} plugins").format(count=len(all_settings)))
+            
+        except Exception as e:
+            BulletinHelper.show_error(get_text("failed_to_import_settings", "Failed to import settings"))
+
+    def _export_all_settings(self, view):
+        export_all_plugin_settings()
+    
+    def _toggle_branch_selector(self, view):
+        current = self.get_setting("show_branch_selector", False)
+        self.set_setting("show_branch_selector", not current, reload_settings=True)
+        
+        if not current:
+            BulletinHelper.show_success(get_text("branch_selector_enabled", "Branch selector enabled!"))
+        else:
+            BulletinHelper.show_info(get_text("branch_selector_disabled", "Branch selector hidden"))
+    
+    def _export_all_plugins(self, view):
+        try:
+            from file_utils import get_cache_dir
+            from com.exteragram.messenger.plugins import PluginsController
+            from org.telegram.messenger import Utilities
+            from java.io import File, FileOutputStream
+            from java.util.zip import ZipOutputStream, ZipEntry
+            from java.nio.file import Files
+            from android.content import Intent
+            from android.net import Uri
+            from org.telegram.ui import LaunchActivity
+            from java.text import SimpleDateFormat
+            from java.util import Date
+            
+            controller = PluginsController.getInstance()
+            plugins_dir = controller.pluginsDir
+            
+            plugin_files = plugins_dir.listFiles()
+            if not plugin_files or len(plugin_files) == 0:
+                BulletinHelper.show_error(get_text("no_plugins_to_export", "No plugins to export"))
+                return
+            
+            cache_dir = get_cache_dir()
+            random_str = Utilities.generateRandomString(4)
+            formatter = SimpleDateFormat("yyyy-MM-dd_HH-mm")
+            timestamp = formatter.format(Date())
+            zip_filename = f"Plugins Backup {timestamp} {random_str}.plugins"
+            zip_file_path = os.path.join(cache_dir, zip_filename)
+            
+            zip_file = File(zip_file_path)
+            if zip_file.exists():
+                zip_file.delete()
+            
+            fos = FileOutputStream(zip_file)
+            zos = ZipOutputStream(fos)
+            
+            exported_count = 0
+            for plugin_file in plugin_files:
+                if plugin_file.isFile() and str(plugin_file.getName()).endswith(".py"):
+                    try:
+                        entry = ZipEntry(plugin_file.getName())
+                        zos.putNextEntry(entry)
+                        
+                        file_bytes = Files.readAllBytes(plugin_file.toPath())
+                        zos.write(file_bytes)
+                        zos.closeEntry()
+                        exported_count += 1
+                    except Exception as e:
+                        self.log(f"Failed to add {plugin_file.getName()}: {e}")
+            
+            zos.close()
+            fos.close()
+            
+            if exported_count == 0:
+                BulletinHelper.show_error(get_text("no_plugins_exported", "No plugins were exported"))
+                return
+            
+            def open_telegram_share():
+                try:
+                    from org.telegram.messenger import ApplicationLoader
+                    context = ApplicationLoader.applicationContext
+                    file_uri = Uri.fromFile(zip_file)
+                    
+                    intent = Intent(context, LaunchActivity)
+                    intent.setAction(Intent.ACTION_SEND)
+                    intent.setType("application/octet-stream")
+                    intent.putExtra(Intent.EXTRA_STREAM, file_uri)
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    
+                    context.startActivity(intent)
+                    BulletinHelper.show_success(get_text("exported_plugins_count", "Exported {count} plugins").format(count=exported_count))
+                except Exception as e:
+                    self.log(f"Error sharing file: {e}")
+            
+            run_on_ui_thread(open_telegram_share)
+            
+        except Exception as e:
+            self.log(f"Error exporting plugins: {e}")
+            BulletinHelper.show_error(get_text("failed_to_export_plugins", "Failed to export plugins"))
+    
+    def _add_filter_pills(self, activity):
+        try:
+            if self.pills_container:
+                return
+            if not self.stored_context:
+                return
+            context = self.stored_context
+            from android.widget import HorizontalScrollView
+            from android.graphics.drawable import GradientDrawable
+            from android.util import TypedValue
+            from android_utils import OnClickListener
+            scroll_view = HorizontalScrollView(context)
+            scroll_view.setHorizontalScrollBarEnabled(False)
+            scroll_view.setClipToPadding(False)
+            pills_layout = LinearLayout(context)
+            pills_layout.setOrientation(LinearLayout.HORIZONTAL)
+            pills_layout.setPadding(int(AndroidUtilities.dp(12)), int(AndroidUtilities.dp(8)), int(AndroidUtilities.dp(12)), int(AndroidUtilities.dp(8)))
+            filters = [
+                (get_text("filter_all", "All"), 0),
+                (get_text("filter_recently_updated", "Recently Updated"), 3),
+                (get_text("filter_enabled", "Enabled"), 1),
+                (get_text("filter_disabled", "Disabled"), 2),
+                (get_text("filter_has_settings", "Has Settings"), 4),
+                (get_text("filter_errors", "Errors"), 5)
+            ]
+            self.filter_pills = []
+            self.filter_base_texts = {}
+            for text, filter_id in filters:
+                self.filter_base_texts[filter_id] = text
+                pill = self._create_pill(text, filter_id, context)
+                pills_layout.addView(pill)
+                self.filter_pills.append((pill, filter_id))
+            scroll_view.addView(pills_layout)
+            self.pills_container = scroll_view
+            self._update_pill_counts()
+            self._update_pill_states()
+        except:
+            pass
+    
+    def _create_pill(self, text, filter_id, context):
+        from android.graphics.drawable import GradientDrawable
+        from android.util import TypedValue
+        from android_utils import OnClickListener
+        pill = TextView(context)
+        pill.setText(text)
+        pill.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 14)
+        pill.setGravity(Gravity.CENTER)
+        pill.setPadding(int(AndroidUtilities.dp(16)), int(AndroidUtilities.dp(6)), int(AndroidUtilities.dp(16)), int(AndroidUtilities.dp(6)))
+        margin = int(AndroidUtilities.dp(4))
+        lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        lp.setMargins(margin, 0, margin, 0)
+        pill.setLayoutParams(lp)
+        drawable = GradientDrawable()
+        drawable.setCornerRadius(AndroidUtilities.dp(16))
+        pill.setBackground(drawable)
+        pill.setOnClickListener(self._create_pill_click_listener(filter_id))
+        return pill
+    
+    def _create_pill_click_listener(self, filter_id):
+        plugin = self
+        def on_click(view=None):
+            try:
+                plugin.current_filter = filter_id
+                plugin._update_pill_states()
+                plugin._refresh_plugins_list(plugin.stored_activity)
+            except:
+                pass
+        from android_utils import OnClickListener
+        return OnClickListener(on_click)
+    
+    def _get_plugin_counts(self):
+        try:
+            from com.exteragram.messenger.plugins import PluginsController
+            plugins_controller = PluginsController.getInstance()
+            all_plugins = plugins_controller.plugins
+            counts = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+            
+            for key in all_plugins.keySet().toArray():
+                plugin = all_plugins.get(key)
+                if plugin:
+                    counts[0] += 1
+                    if plugin.isEnabled():
+                        counts[1] += 1
+                    else:
+                        counts[2] += 1
+                    if self._is_recently_updated(plugin):
+                        counts[3] += 1
+                    if plugins_controller.hasPluginSettings(plugin.getId()):
+                        counts[4] += 1
+                    if plugin.hasError():
+                        counts[5] += 1
+            return counts
+        except:
+            return {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+    
+    def _update_pill_counts(self):
+        try:
+            if not hasattr(self, 'filter_base_texts'):
+                return
+            
+            counts = self._get_plugin_counts()
+            
+            for pill, filter_id in self.filter_pills:
+                base_text = self.filter_base_texts.get(filter_id, "")
+                count = counts.get(filter_id, 0)
+                pill.setText(f"{base_text}-{count}")
+        except:
+            pass
+    
+    def _update_pill_states(self):
+        try:
+            from android.graphics.drawable import GradientDrawable
+            from androidx.core.graphics import ColorUtils
+            for pill, filter_id in self.filter_pills:
+                is_selected = (filter_id == self.current_filter)
+                if is_selected:
+                    pill.setTextColor(Theme.getColor(Theme.key_actionBarTabActiveText))
+                    drawable = pill.getBackground()
+                    if isinstance(drawable, GradientDrawable):
+                        base_color = Theme.getColor(Theme.key_actionBarTabLine)
+                        drawable.setColor(ColorUtils.setAlphaComponent(base_color, 0x1F))
+                else:
+                    pill.setTextColor(Theme.getColor(Theme.key_actionBarTabUnactiveText))
+                    drawable = pill.getBackground()
+                    if isinstance(drawable, GradientDrawable):
+                        drawable.setColor(Theme.getColor(Theme.key_windowBackgroundWhite))
+                        drawable.setStroke(AndroidUtilities.dp(1), Theme.getColor(Theme.key_divider))
+        except:
+            pass
+    
+    def _refresh_plugins_list(self, activity):
+        try:
+            self._update_pill_counts()
+            list_view = get_private_field(activity, "listView")
+            if list_view and list_view.adapter:
+                run_on_ui_thread(lambda: list_view.adapter.update(True))
+        except:
+            pass
+    
+    def _is_recently_updated(self, plugin):
+        try:
+            from com.exteragram.messenger.plugins import PluginsController
+            plugins_controller = PluginsController.getInstance()
+            plugin_path = plugins_controller.getPluginPath(plugin.getId())
+            
+            if not plugin_path:
+                return False
+            
+            plugin_file = File(plugin_path)
+            if not plugin_file.exists():
+                return False
+            
+            last_modified = plugin_file.lastModified()
+            current_time = int(time.time() * 1000)
+            one_day_ms = 24 * 60 * 60 * 1000
+            
+            return (current_time - last_modified) <= one_day_ms
+        except:
+            return False
+    
+    def _show_import_plugins_bottom_sheet(self, message_object):
+        def show_sheet():
+            try:
+                from com.exteragram.messenger.utils import ChatUtils
+                from com.exteragram.messenger.plugins import PluginsController
+                
+                file_path = ChatUtils.getInstance().getPathToMessage(message_object)
+                if not file_path:
+                    return
+                
+                from java.io import File
+                from java.util.zip import ZipFile
+                from java.util import Collections
+                
+                zip_file = ZipFile(File(file_path))
+                entries_list = Collections.list(zip_file.entries())
+                
+                plugin_count = 0
+                for i in range(entries_list.size()):
+                    entry = entries_list.get(i)
+                    if not entry.isDirectory() and str(entry.getName()).endswith(".py"):
+                        plugin_count += 1
+                
+                zip_file.close()
+                
+                if plugin_count == 0:
+                    BulletinHelper.show_error(get_text("no_plugins_in_file", "No plugins found in file"))
+                    return
+                
+                subtitle = get_text("plugins_will_be_imported_singular", "{count} plugin will be imported.").format(count=plugin_count) if plugin_count == 1 else get_text("plugins_will_be_imported_plural", "{count} plugins will be imported.").format(count=plugin_count)
+                
+                def on_import_click():
+                    self._import_plugins_from_message(message_object)
+                
+                showupdatebottomsheet(
+                    title=get_text("import_plugins_confirmation", "Import Plugins?"),
+                    subtitle=subtitle,
+                    description=get_text("import_plugins_description", "Existing plugins with the same name will be replaced."),
+                    button_text=get_text("yes_import", "Yes, import"),
+                    button2_text=get_text("cancel", "Cancel"),
+                    show_close_button=False,
+                    raw_resource=R_tg.raw.email_check_inbox,
+                    on_button_click=on_import_click,
+                    on_button2_click=lambda: None
+                )
+                
+            except Exception as e:
+                self.log(f"Error showing import sheet: {e}")
+                BulletinHelper.show_error(get_text("failed_to_read_plugins_file", "Failed to read plugins file"))
+        
+        run_on_ui_thread(show_sheet)
+    
+    def _import_plugins_from_message(self, message_object):
+        def do_import():
+            try:
+                from com.exteragram.messenger.utils import ChatUtils
+                from com.exteragram.messenger.plugins import PluginsController, PluginsConstants
+                from java.io import File, FileOutputStream
+                from java.util.zip import ZipFile
+                from java.nio.file import Files
+                
+                file_path = ChatUtils.getInstance().getPathToMessage(message_object)
+                if not file_path:
+                    return
+                
+                controller = PluginsController.getInstance()
+                plugins_dir = controller.pluginsDir
+                
+                from java.util import Collections
+                
+                zip_file = ZipFile(File(file_path))
+                entries_list = Collections.list(zip_file.entries())
+                
+                imported_count = 0
+                skipped_count = 0
+                for i in range(entries_list.size()):
+                    entry = entries_list.get(i)
+                    if not entry.isDirectory() and str(entry.getName()).endswith(".py"):
+                        try:
+                            plugin_id = str(entry.getName()).replace(".plugin", "").replace(".py", "")
+                            existing = controller.plugins.get(plugin_id)
+         
+                            if existing:
+                                input_stream = zip_file.getInputStream(entry)
+                                from java.io import BufferedReader, InputStreamReader
+                                reader = BufferedReader(InputStreamReader(input_stream, "UTF-8"))
+                                content = ""
+                                line = reader.readLine()
+                                while line is not None:
+                                    content += line + "\n"
+                                    line = reader.readLine()
+                                reader.close()
+                                
+                                backup_ver = [line.split('=')[1].strip(' "\'\n') for line in content.split('\n') if '__version__' in line]
+                                if backup_ver and existing.getVersion() >= backup_ver[0]:
+                                    skipped_count += 1
+                                    continue
+                            
+                            input_stream = zip_file.getInputStream(entry)
+                            output_file = File(plugins_dir, entry.getName())
+                            
+                            from java.nio.file import Files as NIOFiles
+                            from java.nio.file import StandardCopyOption
+                            
+                            NIOFiles.copy(input_stream, output_file.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                            input_stream.close()
+                            imported_count += 1
+                        except Exception as e:
+                            self.log(f"Failed to import {entry.getName()}: {e}")
+                
+                zip_file.close()
+                
+                if imported_count > 0:
+                    def reload_plugins():
+                        try:
+                            python_engine = PluginsController.engines.get(PluginsConstants.PYTHON)
+                            if python_engine:
+                                Runnable = jclass("java.lang.Runnable")
+                                class ReloadCallback(dynamic_proxy(Runnable)):
+                                    def __init__(self, count):
+                                        super().__init__()
+                                        self.count = count
+                                    
+                                    def run(self):
+                                        msg = get_text("imported_plugins_count_reloaded", "Imported {count} plugins successfully!").format(count=self.count)
+                                        if skipped_count > 0:
+                                            msg += " " + get_text("plugins_skipped_count", "({count} skipped)").format(count=skipped_count)
+                                        run_on_ui_thread(lambda: BulletinHelper.show_success(msg))
+                                
+                                python_engine.loadPlugins(ReloadCallback(imported_count))
+                        except Exception as e:
+                            self.log(f"Error reloading plugins: {e}")
+                    
+                    reload_plugins()
+                else:
+                    if skipped_count > 0:
+                        run_on_ui_thread(lambda: BulletinHelper.show_info(get_text("no_plugins_imported_skipped", "No plugins imported ({count} skipped - same or newer version)").format(count=skipped_count)))
+                    else:
+                        run_on_ui_thread(lambda: BulletinHelper.show_error(get_text("no_plugins_imported", "No plugins were imported")))
+                    
+            except Exception as e:
+                self.log(f"Error importing plugins: {e}")
+                run_on_ui_thread(lambda: BulletinHelper.show_error(get_text("failed_to_import_plugins", "Failed to import plugins")))
+        
+        run_on_queue(do_import)
+
+
+class CustomBadgeHook:
+    def __init__(self, plugin):
+        self.plugin = plugin
+        
+    def after_hooked_method(self, param):
+        try:
+            tl_object = param.args[0]
+            
+            if self.plugin.TLRPC_User and isinstance(tl_object, self.plugin.TLRPC_User) and tl_object.id in self.plugin.custom_badges:
+                custom_badge = self.plugin.custom_badges[tl_object.id]
+                param.setResult(custom_badge)
+                return custom_badge
+                    
+            if self.plugin.TLRPC_Chat and isinstance(tl_object, self.plugin.TLRPC_Chat) and tl_object.id in self.plugin.custom_badges:
+                custom_badge = self.plugin.custom_badges[tl_object.id]
+                param.setResult(custom_badge)
+                return custom_badge
+            
+            return param.getResult()
+        except:
+            return param.getResult()
+
+
+class CustomDeveloperHook:
+    def __init__(self, plugin):
+        self.plugin = plugin
         
     def after_hooked_method(self, param):
         try:
@@ -1938,7 +3477,7 @@ def quantahut_log(string: str):
     if setting_getter and setting_getter("show_logs", DEFAULT_SHOW_LOGS):
         log(f"[QuantaHut] {string}")
 
-def get_text(, default: str = None) -> str:
+def get_text(key: str, default: str = None) -> str:
     try:
         return get_localized_string("UiTweaks", key, default or key)
     except Exception as e:
