@@ -5,7 +5,7 @@
   "sticker_pack": "GuAIcons",
   "sticker_index": 1,
   "sticker_circle": false,
-  "sticker_size": 160,
+  "sticker_size": 50,
   "min_app_version": "12.1.1",
   "download_url": "https://raw.githubusercontent.com/oxxx1mif/gua-auto-update/refs/heads/main/gualib.plugin",
   "requires_restart": true,
