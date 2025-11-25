@@ -38,7 +38,7 @@ __name__ = "GuALib"
 __description__ = "**Library for GuA** | Based on QuantaHut"
 __icon__ = "GuAIcons/1"
 __id__ = "gualib"
-__version__ = "1.0.1"
+__version__ = "1.0.0"
 __author__ = "@oxxximif | oxxx1Storm"
 __min_version__ = "12.1.1"
 __priority__ = 1
@@ -1600,10 +1600,10 @@ class QuantaDeeplinkHook:
             elif url == "tg://refresh":
                 run_on_ui_thread(self._refresh_badges_direct)
                 param.setResult(None)
-            elif url == "tg://guasup":
+            elif url == "tg://gua":
                 run_on_ui_thread(self.plugin._show_gua_support)
                 param.setResult(None)
-            elif url == "tg://Guasup":
+            elif url == "tg://GuA":
                 run_on_ui_thread(self.plugin._show_gua_support)
                 param.setResult(None)                
         except Exception as e:
